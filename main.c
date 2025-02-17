@@ -55,7 +55,7 @@ uint16_t converter_joystick_para_pwm(uint16_t valor) {
 
 // Função para desenhar bordas no display OLED
 void desenhar_borda(ssd1306_t *display, uint8_t estilo) {
-   // ssd1306_fill(display, false); // Limpa o display
+    ssd1306_fill(display, false); // Limpa o display
 
     switch (estilo) {
         case 0:
@@ -152,7 +152,7 @@ int main() {
     inicializar_pwm(LED_VERMELHO); // Configura o PWM para o LED vermelho
 
     // Variáveis para controle da posição no display
-    int16_t pos_x = LARGURA_DISPLAY / 2; // Define a posição inicial no meio do display
+    int16_t pos_x = LARGURA_DISPLAY / 4; // Define a posição inicial no meio do display
     int16_t pos_y = ALTURA_DISPLAY / 2;  // Define a posição inicial no meio do display
     uint16_t ultimo_x = CENTRO_JOYSTICK, ultimo_y = CENTRO_JOYSTICK; // Últimas leituras do joystick
 
