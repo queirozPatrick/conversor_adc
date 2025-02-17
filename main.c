@@ -55,7 +55,7 @@ uint16_t converter_joystick_para_pwm(uint16_t valor) {
 
 // Função para desenhar bordas no display OLED
 void desenhar_borda(ssd1306_t *display, uint8_t estilo) {
-    ssd1306_fill(display, false); // Limpa o display
+   // ssd1306_fill(display, false); // Limpa o display
 
     switch (estilo) {
         case 0:
@@ -193,6 +193,7 @@ int main() {
         ssd1306_fill(&display, false); // Limpa o display
         ssd1306_rect(&display, pos_x, pos_y, 8, 8, true, true); // Desenha um quadrado na posição atual
         if (estado_led_verde) desenhar_borda(&display, tipo_borda); // Desenha a borda (se o LED verde estiver ligado)
+        ssd1306_rect(&display, pos_x, pos_y, 8, 8, true, true); // Desenha um quadrado na posição atual
         ssd1306_send_data(&display); // Envia os dados atualizados para o display
         sleep_ms(10); // Pequena pausa para evitar atualizações muito rápidas
         
