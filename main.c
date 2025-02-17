@@ -1,14 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "pico/stdlib.h"       // Biblioteca para funções básicas do Raspberry Pi Pico
+#include "pico/stdlib.h"      
 #include "hardware/adc.h"      // Biblioteca para controlar o conversor analógico-digital (ADC)
 #include "hardware/i2c.h"      // Biblioteca para comunicação I2C
 #include "lib/ssd1306.h"       // Biblioteca para controlar o display OLED SSD1306
-#include "lib/font.h"          // Biblioteca para fontes (não utilizada diretamente aqui)
-#include "hardware/pwm.h"     // Biblioteca para controlar PWM (Modulação por Largura de Pulso)
+#include "hardware/pwm.h"      // Biblioteca para controlar PWM
 
 // Definições de pinos para LEDs e botões
 #define LED_AZUL 12            // Pino do LED azul
+#define LED_VERMELHO 13        // Pino do LED vermelho
 #define LED_VERMELHO 13        // Pino do LED vermelho
 #define LED_VERDE 11           // Pino do LED verde
 #define BOTAO_JOYSTICK 22      // Pino do botão do joystick
@@ -22,9 +22,9 @@
 
 // Definições para o display OLED
 #define PORTA_I2C i2c1         // Porta I2C utilizada
-#define PIN_I2C_SDA 14         // Pino SDA (dados) do I2C
-#define PIN_I2C_SCL 15         // Pino SCL (clock) do I2C
-#define ENDERECO_SSD1306 0x3C  // Endereço I2C do display OLED
+#define PIN_I2C_SDA 14         // Pino dados do I2C
+#define PIN_I2C_SCL 15         // Pino clock do I2C
+#define ENDERECO_SSD1306 0x3C  // Endereço I2C do display LED
 #define LARGURA_DISPLAY 128    // Largura do display em pixels
 #define ALTURA_DISPLAY 64      // Altura do display em pixels
 
@@ -55,9 +55,25 @@ uint16_t converter_joystick_para_pwm(uint16_t valor) {
 
 // Função para desenhar bordas no display OLED
 void desenhar_borda(ssd1306_t *display, uint8_t estilo) {
-    ssd1306_rect(display, 3, 3, 122, 58, true, false); // Desenha a primeira borda
-    if (estilo > 0) ssd1306_rect(display, 6, 6, 116, 52, true, false); // Desenha a segunda borda (se estilo > 0)
-    if (estilo > 1) ssd1306_rect(display, 9, 9, 110, 46, true, false); // Desenha a terceira borda (se estilo > 1)
+    ssd1306_fill(display, false); // Limpa o display
+
+    switch (estilo) {
+        case 0:
+            // Borda simples
+            ssd1306_rect(display, 3, 3, 122, 58, true, false);
+            break;
+        case 1:
+            // Borda dupla
+            ssd1306_rect(display, 3, 3, 122, 58, true, false);
+            ssd1306_rect(display, 6, 6, 116, 52, true, false);
+            break;
+        case 2:
+            // Borda tripla
+            ssd1306_rect(display, 3, 3, 122, 58, true, false);
+            ssd1306_rect(display, 6, 6, 116, 52, true, false);
+            ssd1306_rect(display, 9, 9, 110, 46, true, false);
+            break;
+    }
 }
 
 // Função de tratamento de interrupção dos botões
@@ -136,7 +152,8 @@ int main() {
     inicializar_pwm(LED_VERMELHO); // Configura o PWM para o LED vermelho
 
     // Variáveis para controle da posição no display
-    int16_t pos_x = ALTURA_DISPLAY / 2.5, pos_y = LARGURA_DISPLAY / 2; // Posição inicial no display
+    int16_t pos_x = LARGURA_DISPLAY / 2; // Define a posição inicial no meio do display
+    int16_t pos_y = ALTURA_DISPLAY / 2;  // Define a posição inicial no meio do display
     uint16_t ultimo_x = CENTRO_JOYSTICK, ultimo_y = CENTRO_JOYSTICK; // Últimas leituras do joystick
 
     // Loop principal
@@ -178,6 +195,7 @@ int main() {
         if (estado_led_verde) desenhar_borda(&display, tipo_borda); // Desenha a borda (se o LED verde estiver ligado)
         ssd1306_send_data(&display); // Envia os dados atualizados para o display
         sleep_ms(10); // Pequena pausa para evitar atualizações muito rápidas
+        
     }
-    return 0; // Fim do programa (nunca será alcançado)
+    return 0;
 }
