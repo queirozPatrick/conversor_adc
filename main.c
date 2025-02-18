@@ -1,202 +1,243 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include "pico/stdlib.h"      
-#include "hardware/adc.h"      // Biblioteca para controlar o conversor analógico-digital (ADC)
-#include "hardware/i2c.h"      // Biblioteca para comunicação I2C
-#include "lib/ssd1306.h"       // Biblioteca para controlar o display OLED SSD1306
-#include "hardware/pwm.h"      // Biblioteca para controlar PWM
+#include "pico/stdlib.h"
+#include "hardware/gpio.h"
+#include "hardware/adc.h"
+#include "hardware/pwm.h"
+#include "hardware/i2c.h"
+#include "lib/ssd1306.h"
+#include "lib/font.h"
 
-// Definições de pinos para LEDs e botões
-#define LED_AZUL 12            // Pino do LED azul
-#define LED_VERMELHO 13        // Pino do LED vermelho
-#define LED_VERMELHO 13        // Pino do LED vermelho
-#define LED_VERDE 11           // Pino do LED verde
-#define BOTAO_JOYSTICK 22      // Pino do botão do joystick
-#define BOTAO_A 5              // Pino do botão A
-#define CANAL_ADC_Y 0          // Canal ADC para o eixo Y do joystick
-#define CANAL_ADC_X 1          // Canal ADC para o eixo X do joystick
+// Definições de pinos
+#define PINO_LED_VERMELHO 13
+#define PINO_LED_VERDE 11
+#define PINO_LED_AZUL 12
 
-// Definições para o joystick
-#define CENTRO_JOYSTICK 2048   // Valor central do joystick (12 bits, 0-4095)
-#define ZONA_MORTA 200         // Zona morta para evitar leituras sensíveis ao redor do centro
+#define PINO_EIXO_X 26
+#define PINO_EIXO_Y 27
+#define PINO_BOTAO_JOYSTICK 22
+#define PINO_BOTAO_A 5
 
-// Definições para o display OLED
-#define PORTA_I2C i2c1         // Porta I2C utilizada
-#define PIN_I2C_SDA 14         // Pino dados do I2C
-#define PIN_I2C_SCL 15         // Pino clock do I2C
-#define ENDERECO_SSD1306 0x3C  // Endereço I2C do display LED
-#define LARGURA_DISPLAY 128    // Largura do display em pixels
-#define ALTURA_DISPLAY 64      // Altura do display em pixels
+#define PINO_I2C_SDA 14
+#define PINO_I2C_SCL 15
+#define ENDERECO_I2C 0x3C
 
-// Variáveis globais voláteis (para uso em interrupções)
-volatile bool estado_pwm = true;               // Estado do PWM (ligado/desligado)
-volatile bool estado_led_verde = false;        // Estado do LED verde
-volatile uint8_t tipo_borda = 0;               // Tipo de borda a ser desenhada no display
-volatile absolute_time_t tempo_ultimo_joystick; // Último tempo que o botão do joystick foi pressionado
-volatile bool status_botao_joystick = false;   // Estado do botão do joystick
-volatile absolute_time_t tempo_ultimo_botao_a; // Último tempo que o botão A foi pressionado
-volatile bool status_botao_a = false;          // Estado do botão A
+#define LARGURA_DISPLAY 128
+#define ALTURA_DISPLAY 64
 
-// Função para inicializar o PWM em um pino específico
-void inicializar_pwm(uint pino) {
-    gpio_set_function(pino, GPIO_FUNC_PWM);    // Configura o pino para função PWM
-    uint slice = pwm_gpio_to_slice_num(pino);  // Obtém o slice (fatia) do PWM associado ao pino
-    pwm_config configuracao = pwm_get_default_config(); // Obtém a configuração padrão do PWM
-    pwm_config_set_wrap(&configuracao, 4095);  // Define o valor máximo do PWM (12 bits)
-    pwm_init(slice, &configuracao, true);      // Inicializa o PWM com a configuração definida
-}
+#define ATRASO_DEBOUNCE_MS 200
+#define ZONA_MORTA 200
+#define FATOR_SUAVIZACAO 0.5f
+#define AJUSTE_Y 52
+#define VALOR_MAXIMO_PWM 255
 
-// Função para converter a leitura do joystick em um valor PWM
-uint16_t converter_joystick_para_pwm(uint16_t valor) {
-    if (abs((int16_t)valor - CENTRO_JOYSTICK) < ZONA_MORTA) // Verifica se está na zona morta
-        return 0;                                           // Retorna 0 se estiver na zona morta
-    return (valor < CENTRO_JOYSTICK) ? (CENTRO_JOYSTICK - valor) : (valor - CENTRO_JOYSTICK); // Retorna o valor proporcional
-}
+// Variáveis globais
+volatile bool pwm_habilitado = true;
+volatile bool led_verde_ligado = false;
+volatile uint8_t estilo_borda = 0; // 0 = sem borda, 1 = borda simples, 2 = borda dupla, 3 = borda tripla
 
-// Função para desenhar bordas no display OLED
-void desenhar_borda(ssd1306_t *display, uint8_t estilo) {
-    ssd1306_fill(display, false); // Limpa o display
+volatile absolute_time_t ultimo_tempo_botao_joystick;
+volatile absolute_time_t ultimo_tempo_botao_a;
 
-    switch (estilo) {
-        case 0:
-            // Borda simples
-            ssd1306_rect(display, 3, 3, 122, 58, true, false);
-            break;
-        case 1:
-            // Borda dupla
-            ssd1306_rect(display, 3, 3, 122, 58, true, false);
-            ssd1306_rect(display, 6, 6, 116, 52, true, false);
-            break;
-        case 2:
-            // Borda tripla
-            ssd1306_rect(display, 3, 3, 122, 58, true, false);
-            ssd1306_rect(display, 6, 6, 116, 52, true, false);
-            ssd1306_rect(display, 9, 9, 110, 46, true, false);
-            break;
-    }
-}
+ssd1306_t display;
+uint fatia_vermelho, fatia_azul;
+uint canal_vermelho, canal_azul;
 
-// Função de tratamento de interrupção dos botões
-void tratar_interrupcao_gpio(uint gpio, uint32_t eventos) {
-    absolute_time_t agora = get_absolute_time(); // Obtém o tempo atual
-    if (gpio == BOTAO_JOYSTICK && absolute_time_diff_us(tempo_ultimo_joystick, agora) > 50000) {
-        tempo_ultimo_joystick = agora; // Atualiza o tempo do último evento do joystick
-        if (!gpio_get(BOTAO_JOYSTICK)) { // Verifica se o botão do joystick foi pressionado
-            if (!status_botao_joystick) { // Verifica se o botão não estava pressionado antes
-                status_botao_joystick = true; // Atualiza o estado do botão
-                estado_led_verde = !estado_led_verde; // Alterna o estado do LED verde
-                gpio_put(LED_VERDE, estado_led_verde); // Atualiza o LED verde
-                tipo_borda = (tipo_borda + 1) % 3; // Alterna o tipo de borda
-            }
-        } else {
-            status_botao_joystick = false; // Atualiza o estado do botão quando solto
-        }
-    } else if (gpio == BOTAO_A && absolute_time_diff_us(tempo_ultimo_botao_a, agora) > 50000) {
-        tempo_ultimo_botao_a = agora; // Atualiza o tempo do último evento do botão A
-        if (!gpio_get(BOTAO_A)) { // Verifica se o botão A foi pressionado
-            if (!status_botao_a) { // Verifica se o botão não estava pressionado antes
-                status_botao_a = true; // Atualiza o estado do botão
-                estado_pwm = !estado_pwm; // Alterna o estado do PWM
-                if (!estado_pwm) { // Se o PWM foi desligado
-                    pwm_set_gpio_level(LED_AZUL, 0); // Desliga o LED azul
-                    pwm_set_gpio_level(LED_VERMELHO, 0); // Desliga o LED vermelho
-                }
-            }
-        } else {
-            status_botao_a = false; // Atualiza o estado do botão quando solto
-        }
-    }
-}
+// Protótipos de funções
+void configurar_gpio();
+void configurar_pwm();
+void configurar_adc();
+void configurar_i2c();
+void inicializar_display();
+void callback_botao(uint gpio, uint32_t eventos);
+void atualizar_leds(uint16_t brilho_vermelho, uint16_t brilho_azul);
+void desenhar_borda();
+void desenhar_quadrado(uint8_t posicao_x, uint8_t posicao_y);
+uint16_t filtrar_leitura(uint16_t leitura_atual, uint16_t leitura_anterior);
+uint16_t calibrar_eixo_y(uint16_t leitura);
+uint16_t calcular_brilho(uint16_t leitura, uint16_t centro);
 
 // Função principal
 int main() {
-    stdio_init_all(); // Inicializa a comunicação serial (para debug)
+    stdio_init_all();
 
-    // Inicialização do I2C para o display OLED
-    i2c_init(PORTA_I2C, 400 * 1000); // Inicializa o I2C com frequência de 400 kHz
-    gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C); // Configura o pino SDA para I2C
-    gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C); // Configura o pino SCL para I2C
-    gpio_pull_up(PIN_I2C_SDA); // Habilita o pull-up no pino SDA
-    gpio_pull_up(PIN_I2C_SCL); // Habilita o pull-up no pino SCL
+    configurar_gpio();
+    configurar_pwm();
+    configurar_adc();
+    configurar_i2c();
+    inicializar_display();
 
-    // Inicialização do display OLED
-    ssd1306_t display;
-    ssd1306_init(&display, LARGURA_DISPLAY, ALTURA_DISPLAY, false, ENDERECO_SSD1306, PORTA_I2C); // Inicializa o display
-    ssd1306_config(&display); // Configura o display
-    ssd1306_send_data(&display); // Envia dados iniciais
-    ssd1306_fill(&display, false); // Limpa o display
-    ssd1306_send_data(&display); // Envia os dados atualizados
+    uint16_t leitura_filtrada_x = 2048;
+    uint16_t leitura_filtrada_y = 2048;
 
-    // Inicialização dos botões e LEDs
-    gpio_init(BOTAO_JOYSTICK); // Inicializa o pino do botão do joystick
-    gpio_set_dir(BOTAO_JOYSTICK, GPIO_IN); // Configura o pino como entrada
-    gpio_pull_up(BOTAO_JOYSTICK); // Habilita o pull-up no pino
-    gpio_init(LED_VERDE); // Inicializa o pino do LED verde
-    gpio_set_dir(LED_VERDE, GPIO_OUT); // Configura o pino como saída
-    gpio_put(LED_VERDE, 0); // Desliga o LED verde inicialmente
-    gpio_init(BOTAO_A); // Inicializa o pino do botão A
-    gpio_set_dir(BOTAO_A, GPIO_IN); // Configura o pino como entrada
-    gpio_pull_up(BOTAO_A); // Habilita o pull-up no pino
+    while (true) {
+        adc_select_input(0);
+        uint16_t leitura_cru_y = adc_read();
+        adc_select_input(1);
+        uint16_t leitura_cru_x = adc_read();
 
-    // Configuração das interrupções dos botões
-    gpio_set_irq_enabled_with_callback(BOTAO_JOYSTICK, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, tratar_interrupcao_gpio); // Habilita interrupção no botão do joystick
-    gpio_set_irq_enabled(BOTAO_A, GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true); // Habilita interrupção no botão A
+        leitura_filtrada_x = filtrar_leitura(leitura_cru_x, leitura_filtrada_x);
+        leitura_filtrada_y = filtrar_leitura(leitura_cru_y, leitura_filtrada_y);
 
-    // Inicialização do ADC para leitura do joystick
-    adc_init(); // Inicializa o ADC
-    adc_gpio_init(26); // Configura o pino 26 para leitura analógica (eixo Y)
-    adc_gpio_init(27); // Configura o pino 27 para leitura analógica (eixo X)
+        uint16_t nova_leitura_y = calibrar_eixo_y(leitura_filtrada_y);
 
-    // Inicialização do PWM para os LEDs azul e vermelho
-    inicializar_pwm(LED_AZUL); // Configura o PWM para o LED azul
-    inicializar_pwm(LED_VERMELHO); // Configura o PWM para o LED vermelho
+        if ((leitura_filtrada_x > (2048 - ZONA_MORTA)) && (leitura_filtrada_x < (2048 + ZONA_MORTA)))
+            leitura_filtrada_x = 2048;
+        if ((nova_leitura_y > (2048 - ZONA_MORTA)) && (nova_leitura_y < (2048 + ZONA_MORTA)))
+            nova_leitura_y = 2048;
 
-    // Variáveis para controle da posição no display
-    int16_t pos_x = LARGURA_DISPLAY / 4; // Define a posição inicial no meio do display
-    int16_t pos_y = ALTURA_DISPLAY / 2;  // Define a posição inicial no meio do display
-    uint16_t ultimo_x = CENTRO_JOYSTICK, ultimo_y = CENTRO_JOYSTICK; // Últimas leituras do joystick
+        uint16_t brilho_vermelho = calcular_brilho(leitura_filtrada_x, 2048);
+        uint16_t brilho_azul = calcular_brilho(nova_leitura_y, 2048);
 
-    // Loop principal
-    while (1) {
-        // Leitura dos eixos X e Y do joystick
-        adc_select_input(CANAL_ADC_Y); // Seleciona o canal do eixo Y
-        uint16_t y = adc_read(); // Lê o valor do eixo Y
-        adc_select_input(CANAL_ADC_X); // Seleciona o canal do eixo X
-        uint16_t x = adc_read(); // Lê o valor do eixo X
+        atualizar_leds(brilho_vermelho, brilho_azul);
+        gpio_put(PINO_LED_VERDE, led_verde_ligado);
 
-        // Verifica se houve mudança significativa na leitura do joystick
-        if (abs((int16_t)x - (int16_t)ultimo_x) > 10 || abs((int16_t)y - (int16_t)ultimo_y) > 10) {
-            // Converte as leituras do joystick em valores PWM
-            uint16_t pwm_azul = converter_joystick_para_pwm(y); // Valor PWM para o LED azul
-            uint16_t pwm_vermelho = converter_joystick_para_pwm(x); // Valor PWM para o LED vermelho
+        uint8_t posicao_x = (uint32_t)leitura_filtrada_x * (LARGURA_DISPLAY - 8) / 4095;
+        uint8_t posicao_y = (uint32_t)(4095 - nova_leitura_y) * (ALTURA_DISPLAY - 8) / 4095;
 
-            // Calcula o deslocamento no display com base nas leituras do joystick
-            int16_t desloc_x = (-((int16_t)y - CENTRO_JOYSTICK) * 40) / 2048; // Deslocamento no eixo X
-            int16_t desloc_y = (((int16_t)x - CENTRO_JOYSTICK) * 20) / 2048; // Deslocamento no eixo Y
+        ssd1306_fill(&display, false);
+        desenhar_borda();
+        desenhar_quadrado(posicao_x, posicao_y);
+        ssd1306_send_data(&display);
 
-            // Atualiza a posição no display, limitando aos limites da tela
-            pos_x = (pos_x + desloc_x < 0) ? 0 : (pos_x + desloc_x > 56) ? 56 : pos_x + desloc_x;
-            pos_y = (pos_y + desloc_y < 0) ? 0 : (pos_y + desloc_y > 120) ? 120 : pos_y + desloc_y;
-
-            // Atualiza os LEDs com os valores PWM (se o PWM estiver ativado)
-            if (estado_pwm) {
-                pwm_set_gpio_level(LED_AZUL, pwm_azul); // Atualiza o LED azul
-                pwm_set_gpio_level(LED_VERMELHO, pwm_vermelho); // Atualiza o LED vermelho
-            }
-
-            // Atualiza as últimas leituras do joystick
-            ultimo_x = x;
-            ultimo_y = y;
-        }
-
-        // Atualização do display OLED
-        ssd1306_fill(&display, false); // Limpa o display
-        ssd1306_rect(&display, pos_x, pos_y, 8, 8, true, true); // Desenha um quadrado na posição atual
-        if (estado_led_verde) desenhar_borda(&display, tipo_borda); // Desenha a borda (se o LED verde estiver ligado)
-        ssd1306_rect(&display, pos_x, pos_y, 8, 8, true, true); // Desenha um quadrado na posição atual
-        ssd1306_send_data(&display); // Envia os dados atualizados para o display
-        sleep_ms(10); // Pequena pausa para evitar atualizações muito rápidas
-        
+        sleep_ms(50);
     }
+
     return 0;
+}
+
+// Configuração dos GPIOs
+void configurar_gpio() {
+    gpio_init(PINO_BOTAO_JOYSTICK);
+    gpio_set_dir(PINO_BOTAO_JOYSTICK, GPIO_IN);
+    gpio_pull_up(PINO_BOTAO_JOYSTICK);
+    gpio_set_irq_enabled_with_callback(PINO_BOTAO_JOYSTICK, GPIO_IRQ_EDGE_FALL, true, &callback_botao);
+
+    gpio_init(PINO_BOTAO_A);
+    gpio_set_dir(PINO_BOTAO_A, GPIO_IN);
+    gpio_pull_up(PINO_BOTAO_A);
+    gpio_set_irq_enabled(PINO_BOTAO_A, GPIO_IRQ_EDGE_FALL, true);
+
+    gpio_init(PINO_LED_VERMELHO);
+    gpio_set_dir(PINO_LED_VERMELHO, GPIO_OUT);
+    gpio_init(PINO_LED_VERDE);
+    gpio_set_dir(PINO_LED_VERDE, GPIO_OUT);
+    gpio_init(PINO_LED_AZUL);
+    gpio_set_dir(PINO_LED_AZUL, GPIO_OUT);
+}
+
+// Configuração do PWM
+void configurar_pwm() {
+    gpio_set_function(PINO_LED_VERMELHO, GPIO_FUNC_PWM);
+    fatia_vermelho = pwm_gpio_to_slice_num(PINO_LED_VERMELHO);
+    canal_vermelho = pwm_gpio_to_channel(PINO_LED_VERMELHO);
+    pwm_set_wrap(fatia_vermelho, VALOR_MAXIMO_PWM);
+    pwm_set_clkdiv(fatia_vermelho, 125.f);
+    pwm_set_enabled(fatia_vermelho, true);
+
+    gpio_set_function(PINO_LED_AZUL, GPIO_FUNC_PWM);
+    fatia_azul = pwm_gpio_to_slice_num(PINO_LED_AZUL);
+    canal_azul = pwm_gpio_to_channel(PINO_LED_AZUL);
+    pwm_set_wrap(fatia_azul, VALOR_MAXIMO_PWM);
+    pwm_set_clkdiv(fatia_azul, 125.f);
+    pwm_set_enabled(fatia_azul, true);
+}
+
+// Configuração do ADC
+void configurar_adc() {
+    adc_init();
+    adc_gpio_init(PINO_EIXO_X);
+    adc_gpio_init(PINO_EIXO_Y);
+}
+
+// Configuração do I2C
+void configurar_i2c() {
+    i2c_init(i2c1, 400 * 1000);
+    gpio_set_function(PINO_I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(PINO_I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(PINO_I2C_SDA);
+    gpio_pull_up(PINO_I2C_SCL);
+}
+
+// Inicialização do display
+void inicializar_display() {
+    ssd1306_init(&display, LARGURA_DISPLAY, ALTURA_DISPLAY, false, ENDERECO_I2C, i2c1);
+    ssd1306_config(&display);
+}
+
+// Callback para os botões
+void callback_botao(uint gpio, uint32_t eventos) {
+    absolute_time_t agora = get_absolute_time();
+
+    if (gpio == PINO_BOTAO_JOYSTICK) {
+        if (absolute_time_diff_us(ultimo_tempo_botao_joystick, agora) < ATRASO_DEBOUNCE_MS * 1000) return;
+        ultimo_tempo_botao_joystick = agora;
+
+        // Alterna o estilo da borda entre 0 (sem borda), 1, 2 e 3
+        estilo_borda = (estilo_borda + 1) % 4;
+
+        // Liga o LED verde apenas se a borda estiver ativa (estilo_borda != 0)
+        led_verde_ligado = (estilo_borda != 0);
+    } else if (gpio == PINO_BOTAO_A) {
+        if (absolute_time_diff_us(ultimo_tempo_botao_a, agora) < ATRASO_DEBOUNCE_MS * 1000) return;
+        ultimo_tempo_botao_a = agora;
+
+        pwm_habilitado = !pwm_habilitado;
+        if (!pwm_habilitado) {
+            pwm_set_chan_level(fatia_vermelho, canal_vermelho, 0);
+            pwm_set_chan_level(fatia_azul, canal_azul, 0);
+        }
+    }
+}
+
+// Atualiza os LEDs PWM
+void atualizar_leds(uint16_t brilho_vermelho, uint16_t brilho_azul) {
+    if (pwm_habilitado) {
+        pwm_set_chan_level(fatia_vermelho, canal_vermelho, brilho_vermelho);
+        pwm_set_chan_level(fatia_azul, canal_azul, brilho_azul);
+    }
+}
+
+// Desenha a borda no display
+void desenhar_borda() {
+    if (estilo_borda == 1) {
+        // Estilo 1: borda simples
+        ssd1306_rect(&display, 0, 0, LARGURA_DISPLAY, ALTURA_DISPLAY, true, false);
+    } else if (estilo_borda == 2) {
+        // Estilo 2: borda dupla
+        ssd1306_rect(&display, 0, 0, LARGURA_DISPLAY, ALTURA_DISPLAY, true, false);
+        ssd1306_rect(&display, 2, 2, LARGURA_DISPLAY - 4, ALTURA_DISPLAY - 4, true, false);
+    } else if (estilo_borda == 3) {
+        // Estilo 3: borda tripla
+        ssd1306_rect(&display, 0, 0, LARGURA_DISPLAY, ALTURA_DISPLAY, true, false);
+        ssd1306_rect(&display, 2, 2, LARGURA_DISPLAY - 4, ALTURA_DISPLAY - 4, true, false);
+        ssd1306_rect(&display, 4, 4, LARGURA_DISPLAY - 8, ALTURA_DISPLAY - 8, true, false);
+    }
+    // Se estilo_borda == 0, não desenha nada
+}
+
+// Desenha o quadrado móvel no display
+void desenhar_quadrado(uint8_t posicao_x, uint8_t posicao_y) {
+    ssd1306_rect(&display, posicao_y, posicao_x, 8, 8, true, true);
+}
+
+// Filtra a leitura do ADC usando EMA
+uint16_t filtrar_leitura(uint16_t leitura_atual, uint16_t leitura_anterior) {
+    return (uint16_t)(FATOR_SUAVIZACAO * leitura_atual + (1.0f - FATOR_SUAVIZACAO) * leitura_anterior);
+}
+
+// Calibra o eixo Y
+uint16_t calibrar_eixo_y(uint16_t leitura) {
+    uint16_t leitura_calibrada = leitura >= AJUSTE_Y ? leitura - AJUSTE_Y : 0;
+    if (leitura_calibrada > (4095 - AJUSTE_Y)) leitura_calibrada = 4095 - AJUSTE_Y;
+    return (uint16_t)(((uint32_t)leitura_calibrada * 4095) / (4095 - AJUSTE_Y));
+}
+
+// Calcula o brilho do LED com base na leitura do ADC
+uint16_t calcular_brilho(uint16_t leitura, uint16_t centro) {
+    if (leitura < centro - ZONA_MORTA)
+        return ((uint32_t)(centro - ZONA_MORTA - leitura) * VALOR_MAXIMO_PWM) / (centro - ZONA_MORTA);
+    else if (leitura > centro + ZONA_MORTA)
+        return ((uint32_t)(leitura - (centro + ZONA_MORTA)) * VALOR_MAXIMO_PWM) / (4095 - centro - ZONA_MORTA);
+    else
+        return 0;
 }
