@@ -17,7 +17,7 @@ O objetivo do projeto é criar um sistema que integre hardware e software para:
 ---
 
 ## 🎥 Demonstração do Projeto
-- Vídeo do projeto: [Video no Youtube](https://youtube.com/shorts/mBYFWXM37Ng?feature=share)
+- Vídeo do projeto: [Video no Youtube](https://youtu.be/pKIGuwDHmYg)
 
 ## 🔧 Componentes Utilizados
 
